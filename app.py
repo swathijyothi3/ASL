@@ -480,7 +480,7 @@ with tab1:
 
         except Exception as e:
             st.error("Unable to process this image.")
-            print("IMAGE PREDICTION ERROR:", repr(e))
+            st.exception(e)
 
 
 # ==========================================================
@@ -587,7 +587,7 @@ with tab2:
 
         except Exception as e:
             st.error("Unable to process the captured frame.")
-            print("LIVE CAPTURE ERROR:", repr(e))
+            st.exception(e)
 
 
 # ==========================================================
