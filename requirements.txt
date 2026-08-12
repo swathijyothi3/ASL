@@ -31,8 +31,6 @@ httptools==0.8.0
 idna==3.18
 ifaddr==0.2.0
 itsdangerous==2.2.0
-jax==0.4.34
-jaxlib==0.4.34
 Jinja2==3.1.6
 joblib==1.5.3
 jsonschema==4.26.0
