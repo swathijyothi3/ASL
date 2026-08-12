@@ -1,7 +1,32 @@
+# mediapipe is pinned to 0.10.31 on purpose.
+#
+# From 0.10.32 onwards — including 1.0.0 — mediapipe declares a dependency
+# on opencv-contrib-python, the desktop/GUI build. pip then installs it on
+# top of the headless build, and that binary needs libGL, libSM, libICE,
+# libX11, libxcb and libglib present at import time. On Streamlit Cloud
+# the app dies with an ImportError on `import cv2`, and libglib2.0-0
+# cannot be added through packages.txt without an apt conflict.
+#
+# 0.10.31 declares no OpenCV dependency at all, so only the headless build
+# is installed and no system libraries are required. Check this before
+# bumping the version:
+#     pip download --no-deps mediapipe==<new> && grep -i opencv <METADATA>
+
+# tensorflow-cpu is pinned to 2.20.0 because 2.21.0 was never published
+# for Linux — that release is Windows/macOS only, so a Linux deployment
+# cannot install it and the whole dependency install fails, which leaves
+# the app with no third-party packages at all.
+#
+# keras is pinned separately: output/asl_ann_model.keras was written by
+# Keras 3.15.1, and tensorflow-cpu 2.20.0 only asks for keras>=3.10.0.
+# Without this pin the deployment could resolve an older Keras than the
+# one that saved the model.
+
 streamlit==1.61.1
 opencv-contrib-python-headless==5.0.0.93
-mediapipe==1.0.0
-tensorflow-cpu==2.21.0
+mediapipe==0.10.31
+tensorflow-cpu==2.20.0
+keras==3.15.1
 numpy==2.4.6
 scikit-learn==1.9.0
 joblib==1.5.3

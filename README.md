@@ -183,13 +183,38 @@ sample images are all committed, so nothing needs to be fetched at runtime.
 6. Click **Deploy**. The first build takes several minutes, mostly
    installing TensorFlow.
 
-`packages.txt` installs the system libraries OpenCV needs on Linux. Without it
-the build fails with `libGL.so.1: cannot open shared object file`.
+### Two pins that the deployment depends on
 
-Leave that file as it is. Adding `libglib2.0-0` to it looks like the obvious
-next step when debugging OpenCV imports, but it conflicts with a package
-already present in the Streamlit Cloud image and fails the whole apt stage.
-The four entries listed are the set that builds cleanly.
+Both were found by resolving `requirements.txt` against Linux rather than by
+trial and error, and changing either one will break the deployed app.
+
+**`tensorflow-cpu==2.20.0`** — version 2.21.0 was never published for Linux;
+it exists only for Windows and macOS. Asking for it on Streamlit Cloud makes
+the entire dependency install fail, which leaves the app with no third-party
+packages at all and a confusing `ImportError` on the first `import`. `keras`
+is pinned alongside it because the saved model was written by Keras 3.15.1
+while TensorFlow only requires `keras>=3.10.0`.
+
+**`mediapipe==0.10.31`** — from 0.10.32 onwards (1.0.0 included) mediapipe
+depends on `opencv-contrib-python`, the desktop build. pip installs it over
+the headless one, and that binary needs `libGL`, `libSM`, `libICE`, `libX11`,
+`libxcb` and `libglib` present at import. `libglib2.0-0` cannot be added
+through `packages.txt` without an apt conflict, so this is not fixable from
+the system side. 0.10.31 declares no OpenCV dependency, so only the headless
+build is installed and no system libraries are needed at all.
+
+Before bumping mediapipe, check that the new version has not reintroduced the
+dependency:
+
+```bash
+pip download --no-deps mediapipe==<version> -d /tmp/mp
+```
+
+then look for `opencv` in the wheel's `METADATA`.
+
+`packages.txt` is kept as a safety net for OpenCV on Linux, but with the
+headless build it is no longer doing any real work. Do not add
+`libglib2.0-0` to it.
 
 ---
 
