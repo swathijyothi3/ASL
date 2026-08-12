@@ -1,6 +1,7 @@
-# Virtual environment
+# Virtual environments
 venv/
 env/
+.venv/
 *.venv
 
 # Python cache
@@ -8,8 +9,10 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Streamlit
-.streamlit/
+# Streamlit runtime secrets
+# NOTE: .streamlit/config.toml is committed on purpose — it carries the
+# app's theme and has to reach the deployment. Only secrets are ignored.
+.streamlit/secrets.toml
 
 # OS files
 .DS_Store
@@ -18,8 +21,6 @@ Thumbs.db
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
-# Large model / data files (see README for how to obtain these)
-# Uncomment these if you don't want to commit large binaries to GitHub:
-# models/hand_landmarker.task
-# output/asl_ann_model.keras
-# dataset/
+# The model files, landmark CSV and dataset are deliberately committed.
+# Streamlit Community Cloud installs only what is in the repository, so
+# removing them would leave the deployed app with nothing to load.

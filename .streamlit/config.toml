@@ -1,0 +1,17 @@
+# Shared theme so Streamlit's own widgets match the app's styling
+# instead of being overridden with CSS after the fact.
+
+[theme]
+base = "dark"
+primaryColor = "#38bdf8"
+backgroundColor = "#0b1120"
+secondaryBackgroundColor = "#131f38"
+textColor = "#e2e8f0"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+# Hand photos are small; this keeps a stray 200 MB upload from
+# tying up the container.
+maxUploadSize = 10

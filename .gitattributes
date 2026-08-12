@@ -1,0 +1,13 @@
+# Keep text files as LF in the repository. The app is developed on
+# Windows and deployed on Linux, so without this the line endings
+# churn on every commit.
+
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.keras binary
+*.pkl binary
+*.task binary
+*.ipynb -text
