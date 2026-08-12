@@ -544,7 +544,7 @@ with tab2:
                 st.image(
                     display_frame,
                     caption="Captured Frame",
-                    use_column_width=True
+                    use_container_width=True
                 )
 
             with col2:
