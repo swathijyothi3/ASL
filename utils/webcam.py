@@ -101,6 +101,8 @@ _TEMPLATE = r"""
 const CONFIG = __CONFIG__;
 const MODEL  = __MODEL__;
 
+let backend = "?";
+
 const video   = document.getElementById("cam");
 const canvas  = document.getElementById("view");
 const ctx     = canvas.getContext("2d");
@@ -315,7 +317,15 @@ function readout() {
 
 /* ---------- main loop ---------- */
 
-let landmarker = null, stream = null, running = false, lastVideoTime = -1;
+let landmarker = null, stream = null, running = false;
+
+/* Detection runs on a small offscreen copy rather than the camera frame.
+   Cost scales with pixels, and laptop webcams hand back 720p or more where
+   a phone often gives far less — which is why this view could run smoothly
+   on a phone and stutter on a laptop. A hand is perfectly findable at this
+   size, and landmarks come back normalised so they map to any canvas. */
+const detect = document.createElement("canvas");
+const dctx = detect.getContext("2d", { willReadFrequently: true });
 
 async function setup() {
   let vision;
@@ -328,19 +338,36 @@ async function setup() {
     return;
   }
 
-  try {
-    const files = await vision.FilesetResolver.forVisionTasks(CONFIG.wasm);
-    landmarker = await vision.HandLandmarker.createFromOptions(files, {
-      baseOptions: { modelAssetPath: CONFIG.handModel, delegate: "GPU" },
-      runningMode: "VIDEO",
-      numHands: 1,
-      minHandDetectionConfidence: CONFIG.detection,
-      minHandPresenceConfidence: CONFIG.detection,
-      minTrackingConfidence: CONFIG.detection,
-    });
-  } catch (e) {
-    fail("The hand detector could not start: " + e.message);
+  const files = await vision.FilesetResolver.forVisionTasks(CONFIG.wasm).catch(() => null);
+
+  if (!files) {
+    fail("Could not load the hand detector. Use “Take a photo” instead.");
     return;
+  }
+
+  const options = (delegate) => ({
+    baseOptions: { modelAssetPath: CONFIG.handModel, delegate },
+    runningMode: "VIDEO",
+    numHands: 1,
+    minHandDetectionConfidence: CONFIG.detection,
+    minHandPresenceConfidence: CONFIG.detection,
+    minTrackingConfidence: CONFIG.detection,
+  });
+
+  // GPU is much faster where it works, but some laptop drivers and
+  // browsers fail or fall into a slow path, so CPU is a real fallback
+  // rather than a formality.
+  try {
+    landmarker = await vision.HandLandmarker.createFromOptions(files, options("GPU"));
+    backend = "GPU";
+  } catch (e) {
+    try {
+      landmarker = await vision.HandLandmarker.createFromOptions(files, options("CPU"));
+      backend = "CPU";
+    } catch (e2) {
+      fail("The hand detector could not start: " + e2.message);
+      return;
+    }
   }
 
   statusEl.textContent = net
@@ -353,7 +380,12 @@ async function setup() {
 async function start() {
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 960 }, height: { ideal: 720 }, facingMode: "user" },
+      video: {
+        width: { ideal: CONFIG.captureWidth },
+        height: { ideal: Math.round(CONFIG.captureWidth * 3 / 4) },
+        frameRate: { ideal: 30, max: 30 },
+        facingMode: "user",
+      },
       audio: false,
     });
   } catch (e) {
@@ -364,12 +396,19 @@ async function start() {
   video.srcObject = stream;
   await video.play();
 
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
+  // Cap what is drawn. A 1080p webcam gains nothing here and costs fill
+  // rate on every frame.
+  const ratio = video.videoHeight / video.videoWidth;
+  const width = Math.min(video.videoWidth, CONFIG.displayWidth);
+
+  canvas.width = Math.round(width);
+  canvas.height = Math.round(width * ratio);
+
+  detect.width = CONFIG.detectWidth;
+  detect.height = Math.round(CONFIG.detectWidth * ratio);
 
   running = true;
   toggle.textContent = "Stop camera";
-  statusEl.textContent = "running in your browser — no video is uploaded";
   requestAnimationFrame(loop);
 }
 
@@ -377,13 +416,22 @@ function stop() {
   running = false;
   if (stream) stream.getTracks().forEach(t => t.stop());
   stream = null;
+  held = null;
   toggle.textContent = "Start camera";
   statusEl.textContent = "camera stopped";
 }
 
 toggle.addEventListener("click", () => (running ? stop() : start()));
 
-function loop() {
+/* The video is redrawn every frame so it stays smooth, but detection runs
+   on a timer well below the display rate. Detecting on every frame is what
+   made this stutter: it is by far the most expensive step, and running it
+   more often than a hand actually moves buys nothing. */
+
+let lastDetect = 0, held = null, lastTime = -1;
+let frames = 0, fpsSince = 0, detections = 0;
+
+function loop(now) {
   if (!running) return;
 
   const w = canvas.width, h = canvas.height;
@@ -395,12 +443,18 @@ function loop() {
   ctx.drawImage(video, 0, 0, w, h);
   ctx.restore();
 
-  if (landmarker && video.currentTime !== lastVideoTime) {
-    lastVideoTime = video.currentTime;
+  const due = now - lastDetect >= 1000 / CONFIG.detectFps;
+
+  if (landmarker && due && video.currentTime !== lastTime) {
+    lastDetect = now;
+    lastTime = video.currentTime;
+
+    dctx.drawImage(video, 0, 0, detect.width, detect.height);
 
     let result = null;
     try {
-      result = landmarker.detectForVideo(video, performance.now());
+      result = landmarker.detectForVideo(detect, now);
+      detections++;
     } catch (e) { /* a dropped frame must not kill the loop */ }
 
     if (result && result.landmarks && result.landmarks.length) {
@@ -409,16 +463,30 @@ function loop() {
       // Classify on the true landmarks; draw on mirrored ones so the
       // overlay sits on the hand as the viewer sees it.
       const guess = classify(raw);
-      const drawn = raw.map(p => ({ x: 1 - p.x, y: p.y, z: p.z }));
-
       settle(guess ? guess.letter : null, guess ? guess.confidence : 0);
 
-      brackets(drawn, w, h, shownConfidence >= CONFIG.threshold);
-      skeleton(drawn, w, h);
+      held = raw.map(p => ({ x: 1 - p.x, y: p.y, z: p.z }));
     } else {
       settle(null, 0);
+      held = null;
     }
     readout();
+  }
+
+  // Drawn from the last detection, so the outline stays on the hand
+  // between detections instead of blinking.
+  if (held) {
+    brackets(held, w, h, shownConfidence >= CONFIG.threshold);
+    skeleton(held, w, h);
+  }
+
+  frames++;
+  if (now - fpsSince >= 1000) {
+    const fps = Math.round(frames * 1000 / (now - fpsSince));
+    const dps = Math.round(detections * 1000 / (now - fpsSince));
+    statusEl.textContent =
+      `running in your browser · ${fps} fps, ${dps} readings/s · ${backend}`;
+    frames = 0; detections = 0; fpsSince = now;
   }
 
   requestAnimationFrame(loop);
@@ -449,6 +517,19 @@ def browser_live_view(threshold=60.0, detection=0.3, height=620, model_path=None
         "detection": float(detection),
         "window": 8,
         "agreement": 0.5,
+
+        # Performance. Detection cost scales with pixels, and a laptop
+        # webcam hands back far more of them than a phone does — which is
+        # why this had to stop running on the raw camera frame.
+        #
+        # 480 is not a guess: measured against the dataset, hands-found and
+        # accuracy are flat from 1280 all the way down to 384 (MediaPipe
+        # downscales internally regardless), and only start to slip at 320.
+        # 480 keeps a margin for small hands at no measured cost.
+        "captureWidth": 640,   # asked of the camera
+        "displayWidth": 800,   # cap on what is drawn
+        "detectWidth": 480,    # what the detector actually sees
+        "detectFps": 15,       # detections per second, not per frame
     }
 
     html = (
