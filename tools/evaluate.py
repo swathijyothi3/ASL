@@ -1,13 +1,17 @@
 """
-Run the full app pipeline over the dataset and report where it fails.
+Measure the whole pipeline the way the app actually runs it.
 
-This is not the notebook's test-set score. The notebook evaluates the
-network on landmarks that were extracted once, up front. This script
-goes through the same path the app does — image → MediaPipe → crop →
-network — so it also catches detection failures and framing problems.
+This is not the training script's held-out score. That number is computed
+on landmarks alone; this one starts from images, so it also captures
+whether MediaPipe finds the hand at all — which is what limits the app in
+practice.
 
-    python tools/evaluate.py                # every image
-    python tools/evaluate.py --limit 20     # 20 images per letter, faster
+Dataset photos are pasted into 1280x720 canvases to imitate a webcam at
+various distances, and mirrored to imitate the other hand.
+
+    python tools/evaluate.py
+    python tools/evaluate.py --samples 3      # quicker
+    python tools/evaluate.py --per-letter     # where the mistakes are
 """
 
 import argparse
@@ -16,33 +20,98 @@ import sys
 from collections import Counter, defaultdict
 
 import cv2
+import numpy as np
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.path.insert(0, BASE_DIR)
 
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
 from utils.predictor import ASLPredictor  # noqa: E402
 
-
 DATASET_PATH = os.path.join(BASE_DIR, "dataset", "ASL_Dataset", "dataset")
+
+CANVAS_W, CANVAS_H = 1280, 720
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Maximum images per letter (default: all).",
-    )
-    parser.add_argument(
-        "--no-crop",
-        action="store_true",
-        help="Skip the square-crop step, to compare against it.",
-    )
-
+    parser.add_argument("--samples", type=int, default=5,
+                        help="Images per letter (default 5).")
+    parser.add_argument("--no-crop", action="store_true",
+                        help="Skip the crop-and-re-detect refinement.")
+    parser.add_argument("--per-letter", action="store_true",
+                        help="Break the webcam case down by letter.")
     return parser.parse_args()
+
+
+def simulate_webcam(image, fraction, slot):
+    """Paste a dataset photo into a wide frame, the way a webcam sees it."""
+
+    target = max(32, int(CANVAS_H * fraction))
+    small = cv2.resize(image, (target, target), interpolation=cv2.INTER_AREA)
+
+    border = np.concatenate([
+        image[0, :, :], image[-1, :, :], image[:, 0, :], image[:, -1, :]
+    ])
+    background = np.median(border, axis=0).astype(np.uint8)
+
+    canvas = np.full((CANVAS_H, CANVAS_W, 3), background, dtype=np.uint8)
+
+    offsets = [(0.5, 0.5), (0.32, 0.45), (0.68, 0.55), (0.5, 0.35), (0.4, 0.62)]
+    fx, fy = offsets[slot % len(offsets)]
+
+    x = max(0, min(int(CANVAS_W * fx - target / 2), CANVAS_W - target))
+    y = max(0, min(int(CANVAS_H * fy - target / 2), CANVAS_H - target))
+
+    canvas[y:y + target, x:x + target] = small
+
+    return canvas
+
+
+def rotate(image, angle):
+    h, w = image.shape[:2]
+    matrix = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+    return cv2.warpAffine(image, matrix, (w, h), borderMode=cv2.BORDER_REPLICATE)
+
+
+def load_samples(per_class):
+    samples = []
+
+    for folder in sorted(os.listdir(DATASET_PATH)):
+        class_path = os.path.join(DATASET_PATH, folder)
+
+        if not os.path.isdir(class_path):
+            continue
+
+        letter = folder.replace("-samples", "")
+
+        names = sorted(
+            name for name in os.listdir(class_path)
+            if name.lower().endswith((".jpg", ".jpeg", ".png"))
+        )
+
+        for slot, name in enumerate(names[:per_class]):
+            image = cv2.imread(os.path.join(class_path, name))
+
+            if image is not None:
+                samples.append((image, letter, slot))
+
+    return samples
+
+
+CASES = [
+    ("dataset photo, as-is", lambda i, s: i),
+    ("mirrored (other hand)", lambda i, s: cv2.flip(i, 1)),
+    ("tilted +20 deg", lambda i, s: rotate(i, 20)),
+    ("tilted -20 deg", lambda i, s: rotate(i, -20)),
+    ("webcam, hand 60% of frame", lambda i, s: simulate_webcam(i, 0.60, s)),
+    ("webcam, hand 45% of frame", lambda i, s: simulate_webcam(i, 0.45, s)),
+    ("webcam, hand 30% of frame", lambda i, s: simulate_webcam(i, 0.30, s)),
+    ("webcam 45%, mirrored", lambda i, s: simulate_webcam(cv2.flip(i, 1), 0.45, s)),
+    ("webcam 45%, tilted 20 deg", lambda i, s: simulate_webcam(rotate(i, 20), 0.45, s)),
+]
 
 
 def main():
@@ -59,67 +128,65 @@ def main():
         encoder_path=os.path.join(BASE_DIR, "output", "label_encoder.pkl"),
     )
 
-    per_class = defaultdict(lambda: {"total": 0, "correct": 0, "missed": 0})
+    samples = load_samples(args.samples)
+
+    print(f"{len(samples)} images per case, {len(predictor.classes)} letters")
+    print(f"crop refinement: {'off' if args.no_crop else 'on'}\n")
+
+    print(f"  {'case':<28s} {'correct':>8s} {'hand found':>11s} {'of those found':>15s}")
+    print("  " + "-" * 66)
+
+    per_letter = defaultdict(lambda: [0, 0])
     confusions = Counter()
 
-    for folder in sorted(os.listdir(DATASET_PATH)):
-        class_path = os.path.join(DATASET_PATH, folder)
+    for name, transform in CASES:
+        correct = found = 0
 
-        if not os.path.isdir(class_path):
-            continue
+        for image, letter, slot in samples:
+            frame = transform(image, slot)
 
-        letter = folder.replace("-samples", "")
-
-        names = sorted(
-            name for name in os.listdir(class_path)
-            if name.lower().endswith((".jpg", ".jpeg", ".png"))
-        )
-
-        if args.limit:
-            names = names[:args.limit]
-
-        for name in names:
-            image = cv2.imread(os.path.join(class_path, name))
-
-            if image is None:
-                continue
-
-            result = predictor.predict(image, use_crop=not args.no_crop)
-
-            stats = per_class[letter]
-            stats["total"] += 1
+            result = predictor.predict(frame, use_crop=not args.no_crop)
 
             if not result.hand_found:
-                stats["missed"] += 1
                 continue
 
-            if result.letter == letter:
-                stats["correct"] += 1
-            else:
+            found += 1
+
+            hit = result.letter == letter
+
+            if hit:
+                correct += 1
+            elif name.startswith("webcam, hand 45%"):
                 confusions[(letter, result.letter)] += 1
 
-        stats = per_class[letter]
-        rate = 100.0 * stats["correct"] / stats["total"] if stats["total"] else 0.0
-        print(f"  {letter}  {rate:6.2f}%   ({stats['correct']}/{stats['total']})")
+            if name.startswith("webcam, hand 45%"):
+                per_letter[letter][0] += int(hit)
+                per_letter[letter][1] += 1
+
+        total = len(samples)
+        share = 100.0 * correct / found if found else 0.0
+
+        print(f"  {name:<28s} {100.0 * correct / total:7.1f}% "
+              f"{100.0 * found / total:10.1f}% {share:14.1f}%")
+
+    print("\n  'of those found' is accuracy counting only the frames where a")
+    print("  hand was detected — it separates the classifier's job from the")
+    print("  detector's.")
+
+    if args.per_letter and per_letter:
+        print("\nPer letter, webcam at 45% of frame")
+        for letter in sorted(per_letter):
+            hits, total = per_letter[letter]
+            rate = 100.0 * hits / total if total else 0.0
+            flag = "   <-- weak" if rate < 70 and total else ""
+            print(f"  {letter}  {rate:6.1f}%  ({hits}/{total}){flag}")
+
+        if confusions:
+            print("\n  most common mistakes")
+            for (true, predicted), count in confusions.most_common(8):
+                print(f"    {true} read as {predicted}  x{count}")
 
     predictor.close()
-
-    total = sum(s["total"] for s in per_class.values())
-    correct = sum(s["correct"] for s in per_class.values())
-    missed = sum(s["missed"] for s in per_class.values())
-
-    print("\n" + "=" * 46)
-    print(f"  Images            {total}")
-    print(f"  Correct           {correct}  ({100.0 * correct / total:.2f}%)")
-    print(f"  No hand detected  {missed}  ({100.0 * missed / total:.2f}%)")
-    print(f"  Crop step         {'off' if args.no_crop else 'on'}")
-    print("=" * 46)
-
-    if confusions:
-        print("\nMost common mistakes")
-        for (true, predicted), count in confusions.most_common(10):
-            print(f"  {true} read as {predicted}   ×{count}")
-
     return 0
 
 

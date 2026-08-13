@@ -1,0 +1,47 @@
+{
+  "feature_version": 2,
+  "classes": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "I",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "R",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y"
+  ],
+  "test_accuracy": 100.0,
+  "robustness": {
+    "held-out test set": 100.0,
+    "mirrored (other hand)": 100.0,
+    "tilted +20 deg": 99.35,
+    "tilted -20 deg": 99.56,
+    "tilted +35 deg": 90.63,
+    "hand at 40% the size": 100.0,
+    "shifted 25% across frame": 100.0
+  },
+  "training_hands": 1835,
+  "augmented_rows": 25690,
+  "augmentation": {
+    "mirror": true,
+    "rotation_degrees": 18.0,
+    "scale_jitter": 0.1,
+    "noise": 0.015,
+    "copies": 6
+  }
+}

@@ -1,10 +1,15 @@
 """
-Justify the square-crop step in ASLPredictor, and derive its constants.
+Measure what the square-crop refinement is still worth.
 
-The model was trained on 224x224 close-ups. MediaPipe reports landmark
-positions relative to whatever image it is handed, so a wide webcam frame
-with a small hand produces feature values the network never saw. This
-script measures that problem and the fix.
+Historical note: this crop originally existed to force webcam framing to
+match the training photos, because the classifier was fed raw image
+coordinates. That is no longer why it is here — utils/features.py reduces
+each hand to pose only, so framing cannot affect the result.
+
+What the crop does now is give MediaPipe a closer look at the hand, which
+places the joints more precisely. Worth roughly 4 points of accuracy at
+webcam distance; tools/evaluate.py --no-crop shows the comparison for the
+whole pipeline.
 
 It does two things:
 

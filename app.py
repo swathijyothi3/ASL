@@ -16,7 +16,7 @@ import streamlit as st
 from packaging.version import Version
 from PIL import Image
 
-from utils.predictor import ASLPredictor
+from utils.predictor import ASLPredictor, FeatureVersionMismatch
 from utils.visuals import (
     class_distribution,
     confidence_bars,
@@ -42,7 +42,16 @@ def project_path(*parts):
 DATASET_PATH = project_path("dataset", "ASL_Dataset", "dataset")
 LANDMARK_CSV = project_path("output", "asl_landmarks.csv")
 
-TEST_ACCURACY = 99.13
+# The live view needs streamlit-webrtc, which needs a WebRTC connection to
+# survive the viewer's network. The snapshot modes work everywhere, so a
+# missing or blocked live view degrades to a notice rather than an error.
+try:
+    from utils.live import live_view
+
+    LIVE_AVAILABLE = True
+except Exception:  # noqa: BLE001 — reported in the interface
+    live_view = None
+    LIVE_AVAILABLE = False
 
 
 # ==========================================================
@@ -397,16 +406,31 @@ except Exception as error:  # noqa: BLE001 — surfaced to the user below
 if not model_ready:
     st.error("The recognition model could not be loaded, so predictions are off.")
 
-    st.markdown(
-        """
-        This usually means the model files are missing. The app expects:
+    if isinstance(load_error, FeatureVersionMismatch):
+        st.markdown(
+            """
+            The saved model was trained on a different definition of the
+            input features than this code produces. Predictions would be
+            confident nonsense, so the app refuses to run.
 
-        - `models/hand_landmarker.task`
-        - `output/asl_ann_model.keras`
-        - `output/scaler.pkl`
-        - `output/label_encoder.pkl`
-        """
-    )
+            Rebuild the model from the current code:
+
+            ```bash
+            python tools/train_model.py
+            ```
+            """
+        )
+    else:
+        st.markdown(
+            """
+            This usually means the model files are missing. The app expects:
+
+            - `models/hand_landmarker.task`
+            - `output/asl_ann_model.keras`
+            - `output/scaler.pkl`
+            - `output/label_encoder.pkl`
+            """
+        )
 
     with st.expander("Technical details"):
         st.exception(load_error)
@@ -436,11 +460,10 @@ with st.sidebar:
         "Smart framing",
         value=True,
         help=(
-            "Zooms in on your hand before reading it. The model was trained "
-            "on close-up photos, so this keeps webcam shots — where the hand "
-            "is small — accurate. Applies to the camera and upload modes; "
-            "the built-in examples are already close-ups. Turn it off to "
-            "see the difference it makes."
+            "After finding your hand, the app takes a closer look at just "
+            "that square and re-reads the joints, which places them more "
+            "precisely. Worth about 4 points of accuracy on webcam-sized "
+            "hands. Turn it off to compare."
         ),
     )
 
@@ -473,7 +496,16 @@ with st.sidebar:
 
     st.markdown("#### Model")
 
-    st.metric("Test accuracy", f"{TEST_ACCURACY}%")
+    accuracy = predictor.test_accuracy
+
+    st.metric(
+        "Held-out accuracy",
+        f"{accuracy:.1f}%" if accuracy is not None else "—",
+        help=(
+            "Measured on signs the model never trained on. Real camera "
+            "accuracy is lower — see the Model tab."
+        ),
+    )
 
     left, right = st.columns(2)
     left.metric("Letters", len(LETTERS))
@@ -514,13 +546,18 @@ def render_tips():
     with st.expander("Tips for a better reading"):
         st.markdown(
             """
-            - **Fill the frame.** Hold your hand up towards the camera so it
-              is the clear subject of the photo.
-            - **Use a plain background.** A wall works better than a busy room.
-            - **Light your hand from the front.** Avoid a bright window behind you.
-            - **Show one hand only**, palm facing the camera the way the
-              reference images in the *Alphabet* tab do.
+            - **Get your hand closer — this matters more than anything else.**
+              Once your hand is found it is read correctly almost every time,
+              but a hand at arm's length in a wide frame often is not found
+              at all. Aim for it covering about half the height of the
+              picture.
             - **Keep the whole hand visible**, including the wrist.
+            - **Light your hand from the front.** Avoid a bright window
+              behind you, which turns your hand into a silhouette.
+            - **A plainer background helps**, though it matters far less
+              than size does.
+            - **Either hand is fine**, and a tilted wrist is fine — the model
+              is trained for both.
             """
         )
 
@@ -756,9 +793,11 @@ with recognise_tab:
             """
             **Three steps:**
 
-            1. Pick how you want to give the app a hand sign — your
-               **camera**, an **image file**, or a built-in **example**.
-            2. Make the sign so your hand fills a good part of the frame.
+            1. Pick how you want to give the app a hand sign — a **live
+               camera**, a **photo**, an **image file**, or a built-in
+               **example**.
+            2. Hold the sign up so your hand is a decent size in the frame.
+               An outline appears around it once the app has found it.
             3. Read the predicted letter, and rotate the 3D hand to see
                what the model saw.
 
@@ -767,24 +806,79 @@ with recognise_tab:
             """
         )
 
+    modes = ["🔴  Live camera", "📷  Take a photo",
+             "🖼️  Upload an image", "✨  Use an example"]
+
     mode = st.radio(
         "How would you like to try it?",
-        ["📷  Camera", "🖼️  Upload an image", "✨  Use an example"],
+        modes,
         horizontal=True,
+        key="input_mode",
         help=(
-            "Camera takes a photo in your browser. Upload works with any "
-            "JPG or PNG. Example uses a photo from the training set, handy "
-            "if you have no webcam."
+            "Live camera outlines your hand and reads it as you move. "
+            "Take a photo is a single snapshot, and works on any network. "
+            "Upload accepts a JPG or PNG. Example uses a training photo, "
+            "handy if you have no webcam."
         ),
     )
 
     st.write("")
 
     # ------------------------------------------------------
-    # CAMERA
+    # LIVE CAMERA
     # ------------------------------------------------------
 
-    if mode.endswith("Camera"):
+    if mode.endswith("Live camera"):
+
+        st.markdown("#### Hold a sign up to the camera")
+        st.caption(
+            "Your hand is outlined as soon as it is found, and the letter "
+            "appears along the bottom of the picture. The view is mirrored, "
+            "so it behaves like a mirror. Nothing is recorded or uploaded."
+        )
+
+        if not LIVE_AVAILABLE:
+            st.warning(
+                "The live view is unavailable in this deployment. "
+                "**Take a photo** works just as well — it uses the same "
+                "recognition, one frame at a time."
+            )
+        else:
+            try:
+                live_view(predictor, threshold=float(threshold), key="live_view")
+            except Exception as error:  # noqa: BLE001 — shown to the user
+                st.warning(
+                    "The live view could not start here. **Take a photo** "
+                    "runs the same recognition and works on any network."
+                )
+                with st.expander("Technical details"):
+                    st.exception(error)
+
+            st.info(
+                "Press **START** and allow camera access. Hold each sign "
+                "still for a moment — the letter is only shown once it "
+                "settles, which stops it flickering between similar shapes."
+            )
+
+            with st.expander("The video will not start"):
+                st.markdown(
+                    """
+                    The live view needs a direct video connection to your
+                    browser, which some office, campus and mobile networks
+                    block. Nothing is wrong with your camera or the app.
+
+                    Switch to **Take a photo** — it runs exactly the same
+                    recognition on a single frame and works on any network.
+                    """
+                )
+
+        render_tips()
+
+    # ------------------------------------------------------
+    # SNAPSHOT CAMERA
+    # ------------------------------------------------------
+
+    elif mode.endswith("Take a photo"):
 
         st.markdown("#### Take a photo of your sign")
         st.caption(
@@ -1030,10 +1124,10 @@ with how_tab:
         ),
         (
             "STEP 03",
-            "Zoom and re-read",
-            "The app crops a square around your hand and detects again, so "
-            "a small hand in a wide photo is measured like the close-up "
-            "photos the model was trained on.",
+            "Reduce to pose",
+            "The joints are centred on your wrist and scaled to a standard "
+            "size, so where your hand is and how far away it sits drop out "
+            "entirely. Only the shape remains.",
         ),
         (
             "STEP 04",
@@ -1061,24 +1155,28 @@ with how_tab:
     st.write("")
     st.divider()
 
-    st.markdown("#### Why the zoom step matters")
+    st.markdown("#### Why step 3 is the important one")
 
     st.markdown(
         """
-        MediaPipe reports landmark positions relative to the image it is
-        given, not in centimetres. A hand filling a square photo and the
-        same hand in the corner of a widescreen webcam frame therefore
-        produce very different numbers, even though the sign is identical.
+        MediaPipe reports each joint as a fraction of the picture it was
+        given, not in centimetres. Raw, those numbers describe **where your
+        hand is and how big it looks** as much as what shape it is making.
 
-        Every training image was a 224×224 close-up. Without the zoom step
-        a webcam photo lands well outside the range the network ever saw
-        during training, and the predictions become unreliable no matter
-        how good the test accuracy looks. Cropping to a square around the
-        hand and reading it again puts the numbers back into a familiar
-        range.
+        Every training photo was a 224×224 close-up of a centred hand. A
+        model fed the raw numbers therefore learns that framing, and a
+        webcam — hand smaller, off to one side, maybe the other hand —
+        falls outside anything it has seen. It stays confident and starts
+        being wrong, which is worse than admitting uncertainty.
 
-        You can see this for yourself: turn **Smart framing** off in the
-        sidebar and re-run a photo where your hand is small in frame.
+        Centring each hand on its own wrist and dividing by its own size
+        removes position and distance completely. The training data is also
+        mirrored, so either hand reads the same, and slightly tilted copies
+        are added so a crooked wrist does not matter.
+
+        One thing is deliberately *not* removed: rotation. In ASL, **P is K
+        rotated downwards** and **Q is G rotated downwards**. A model blind
+        to rotation could never separate those pairs, however well trained.
         """
     )
 
@@ -1106,7 +1204,12 @@ with model_tab:
 
     columns = st.columns(4)
 
-    columns[0].metric("Test accuracy", f"{TEST_ACCURACY}%")
+    accuracy = predictor.test_accuracy
+
+    columns[0].metric(
+        "Held-out accuracy",
+        f"{accuracy:.1f}%" if accuracy is not None else "—",
+    )
     columns[1].metric("Letters covered", len(LETTERS))
     columns[2].metric("Input features", 63)
     columns[3].metric(
@@ -1115,9 +1218,28 @@ with model_tab:
     )
 
     st.caption(
-        "Accuracy is measured on a held-out 20% of the dataset that the "
-        "network never saw while training."
+        "Measured on a held-out 20% of the dataset the network never saw "
+        "while training. Read the next section before trusting it."
     )
+
+    robustness = (predictor.info or {}).get("robustness") or {}
+
+    if robustness:
+        st.write("")
+        st.markdown("#### Does it survive a real camera?")
+        st.caption(
+            "The same held-out signs, altered the way a webcam alters them. "
+            "A model that only works on tidy dataset photos falls apart here."
+        )
+
+        rows = pd.DataFrame(
+            {
+                "Condition": list(robustness.keys()),
+                "Accuracy": [f"{value:.1f}%" for value in robustness.values()],
+            }
+        )
+
+        st.dataframe(rows, hide_index=True, **STRETCH)
 
     st.divider()
 
@@ -1143,15 +1265,17 @@ with model_tab:
             "Dense    128        ReLU\n"
             "Dense     64        ReLU\n"
             "Dropout  0.3\n"
-            "Dense     32        ReLU\n"
+            "Dense     64        ReLU\n"
             "Dense           softmax over letters",
             language="text",
         )
 
         st.markdown(
             """
-            Trained with Adam and early stopping on validation loss,
-            after a `StandardScaler` fitted on the training split only.
+            Trained with Adam and early stopping on validation loss, on
+            pose-normalised landmarks. Every sign is also learned mirrored,
+            tilted and slightly jittered, which is what makes it hold up
+            away from the dataset.
             """
         )
 
@@ -1161,14 +1285,20 @@ with model_tab:
 
     st.markdown(
         """
+        - **Getting your hand *found* is now the hard part.** Once MediaPipe
+          locates a hand, it is read correctly around 95–99% of the time.
+          But at arm's length in a wide frame it often is not located at
+          all. This is why the app keeps asking you to hold your hand
+          closer — it is the single biggest thing you control.
+        - **A high held-out score is not real-world accuracy.** That split
+          comes from the same photo collection as the training data: same
+          lighting, same backgrounds, same hands. Your camera is harder.
         - **One frame at a time.** J and Z are movements, so they are out
           of scope for this design.
         - **H is not in the dataset**, so the app cannot produce it.
         - **One hand only.** The detector is set to a single hand.
-        - **Test accuracy is not real-world accuracy.** The test split
-          comes from the same photo collection as the training data —
-          similar lighting, similar backgrounds, similar hands. Expect
-          more mistakes on your own camera than the 99% suggests.
+        - **M, N, S and T are genuinely close** — all closed fists differing
+          by thumb placement. These are where mistakes concentrate.
         """
     )
 

@@ -11,7 +11,9 @@ Streamlit.
 
 ## Features
 
-- **Three ways in** — take a photo with your camera, upload an image, or run a
+- **Live camera view** — your hand is outlined as you move and the letter is
+  read continuously, so you can adjust until it reads correctly.
+- **Three more ways in** — take a single photo, upload an image, or run a
   built-in example if you have no webcam.
 - **Interactive 3D hand** — the 21 detected landmarks drawn as a rotatable
   skeleton. This is not decoration: depth is one of the three values per
@@ -29,13 +31,17 @@ Streamlit.
 ## How it works
 
 ```
-Photo (camera, upload or sample)
+Frame (live video, photo, upload or sample)
         │
         ▼
 MediaPipe Hand Landmarker  →  21 landmarks (x, y, depth)
+   strict pass, then a permissive one if nothing was found
         │
         ▼
-Square crop around the hand  →  detect again
+Square crop around the hand  →  detect again, for sharper joints
+        │
+        ▼
+Centre on the wrist, scale by hand size   ← the important step
         │
         ▼
 63 features  →  StandardScaler  →  neural network
@@ -44,49 +50,58 @@ Square crop around the hand  →  detect again
 Letter + probability for every class
 ```
 
-### Why the crop step exists
+### The mistake this project started with
 
-MediaPipe reports landmark positions **relative to the image it is given**,
-not in real-world units. Every training image here is a 224×224 close-up with
-the hand filling most of the frame. A webcam photo is wide, and the hand
-usually occupies a small part of it — so the same sign produces very different
-numbers, far outside the range the network saw during training.
+MediaPipe reports each joint as a fraction of the image it was given. Fed in
+raw, those numbers describe **where the hand is and how large it appears** just
+as much as what shape it is making. Every training photo here is a 224×224
+close-up of a centred hand, so a model trained on raw coordinates learns that
+framing. Point a webcam at yourself — hand smaller, off to one side, possibly
+the other hand — and the input lands outside anything it ever saw. It stays
+confident and starts being wrong.
 
-The app therefore crops a square around the detected hand and runs detection a
-second time on that crop, which puts the coordinates back into the range the
-model was trained on.
+The fix is to reduce each hand to pose only: centre it on its own wrist and
+divide by its own size, so position and distance drop out entirely
+(`utils/features.py`). The training set is also mirrored, since a sign means
+the same letter with either hand, and tilted copies are added so a crooked
+wrist does not matter.
 
-`tools/tune_crop.py` measures this. It pastes dataset images into 1280×720
-canvases to imitate a webcam, then scores the pipeline against the known
-labels:
+**Rotation is deliberately left in.** In ASL, P is K rotated downwards and Q is
+G rotated downwards. A rotation-invariant model could never separate those
+pairs, however well trained — so tilt is handled by augmentation rather than
+by normalising it away.
 
-| Hand covers … of the frame | Without the crop | With the crop | Hand found at all |
-|---|---|---|---|
-| 60% of frame height | 15.2% correct | **81.5%** correct | 82.6% |
-| 45% of frame height | 4.3% correct | **63.0%** correct | 66.3% |
-| 30% of frame height | 0.0% correct | 8.7% correct | 9.8% |
+### What that changed, measured
 
-Read the last column together with the others. Once the crop is in place,
-almost every hand that MediaPipe *finds* is classified correctly — 63.0 out of
-66.3, and 81.5 out of 82.6. What limits the app after that is detection, not
-classification: MediaPipe simply cannot locate a hand that occupies 30% of a
-wide frame. That is why the interface keeps telling people to fill the frame.
+`tools/evaluate.py` pastes dataset photos into 1280×720 canvases to imitate a
+webcam at various distances, then runs the whole pipeline against known labels.
+Before and after the change:
 
-The same script derives the two constants it uses, straight from the training
-landmarks rather than by guesswork:
+| Condition | Raw coordinates | Pose-only |
+|---|---|---|
+| Dataset photo, as-is | 93.9% | **98.3%** |
+| Mirrored (other hand) | 74.8% | **97.4%** |
+| Tilted 20° | 73.9% | **95.7%** |
+| Webcam, hand 60% of frame | 74.8% | **93.0%** |
+| Webcam, hand 45% of frame | 59.1% | **88.7%** |
+| Webcam 45%, mirrored | 52.2% | **81.7%** |
 
-- the hand's bounding box covers a mean **0.576** of the training frame, so the
-  crop is sized `1 / 0.576 ≈ 1.74` times the box;
-- the hand sits **low** in those images, centred at about (0.48, 0.59), so the
-  crop is anchored there rather than dead centre.
+### Detection is now the limit, not classification
 
-The sweep is flat between about 1.6 and 1.8, so the exact figure is not
-delicate, and the low anchor turns out to matter less than the zoom does.
+Counting only the frames where MediaPipe actually found a hand, the classifier
+is right **95–99% of the time** in every condition above. What remains is the
+detector: a hand at arm's length in a wide frame often is not found at all.
 
-On the original 224×224 images the crop costs a little accuracy (100% → 98.9%)
-— they are already framed the way the model expects. That trade is worth
-making, since real users point a webcam at themselves rather than feeding in
-dataset files. You can toggle it off in the sidebar ("Smart framing").
+Two things help, both measured in `tools/`:
+
+- **A detection cascade.** A strict pass runs first, so an obvious hand is
+  taken at high confidence; only when that finds nothing does a permissive pass
+  run. At a normal sitting distance this lifted hands-found from 67% to ~90%.
+- **The crop.** Re-detecting on a close crop sharpens the joints — worth about
+  4 points at webcam distance. Toggle it in the sidebar as "Smart framing".
+
+This is why the interface keeps asking you to bring your hand closer: it is the
+one thing you control that matters most.
 
 ---
 
@@ -114,13 +129,22 @@ ASL_VISION/
 │   └── asl_landmarks.csv      # Extracted landmarks (features + labels)
 │
 ├── utils/
-│   ├── predictor.py           # Landmark extraction + inference
+│   ├── features.py            # Landmarks → pose-only features (shared)
+│   ├── predictor.py           # Detection + inference
+│   ├── live.py                # Live camera view and overlay
 │   └── visuals.py             # Plotly figures, including the 3D hand
 │
 └── tools/
-    ├── tune_crop.py           # Measures the crop step and picks the zoom
+    ├── train_model.py         # Trains the shipped model
+    ├── evaluate.py            # Whole-pipeline accuracy, incl. webcam sims
+    ├── tune_crop.py           # Measures the crop refinement
     └── check_setup.py         # Verifies an install before running the app
 ```
+
+`utils/features.py` is imported by both the trainer and the predictor on
+purpose. If the two ever disagreed about how landmarks become numbers, the
+result would be confident nonsense rather than an error — so the model records
+a feature version and the app refuses to load on a mismatch.
 
 ---
 
@@ -222,12 +246,21 @@ headless build it is no longer doing any real work. Do not add
 
 | | |
 |---|---|
-| Test accuracy | 99.13% on a held-out 20% split |
+| Held-out accuracy | 100% on a 20% split the model never trained on |
 | Letters | 23 |
-| Training photos | 2,326 |
-| Input | 63 features — 21 landmarks × (x, y, depth) |
-| Architecture | `Dense(128) → Dense(64) → Dropout(0.3) → Dense(32) → softmax` |
+| Training photos | 2,294 hands, 25,690 rows after mirroring and augmentation |
+| Input | 63 features — 21 landmarks × (x, y, depth), wrist-centred and scaled |
+| Architecture | `Dense(256) → Dense(128) → Dense(64) → softmax`, dropout 0.3 |
 | Training | Adam, early stopping on validation loss |
+
+Retrain with:
+
+```bash
+python tools/train_model.py
+```
+
+That rewrites the model, scaler, encoder and `output/model_info.json`, which
+records the feature version and the measured accuracy the app displays.
 
 ### Supported letters
 
@@ -245,17 +278,26 @@ A B C D E F G I K L M N O P Q R S T U V W X Y
 
 ### Reading the accuracy figure honestly
 
-The 99.13% is measured on a split of the same photo collection used for
-training — similar lighting, backgrounds and hands. It says the network
-separates these classes well; it does not promise the same accuracy on your
-webcam. Expect more mistakes in real use, particularly between visually
-similar signs such as M and N, or A and S.
+**100% on the held-out split does not mean 100% on your camera.** That split
+comes from the same photo collection as the training data: same lighting, same
+backgrounds, same hands. It says the network separates these classes cleanly —
+nothing more. The webcam simulations above (89% at a normal sitting distance)
+are the more useful number, and even those are kinder than a real room.
+
+What actually limits it, in order:
+
+1. **Whether your hand is found at all.** At arm's length in a wide frame,
+   MediaPipe often does not locate it. Hold your hand closer — roughly half the
+   height of the picture.
+2. **Genuinely similar signs.** M, N, S and T are all closed fists differing
+   only in thumb placement. Most remaining mistakes are among these.
 
 Other limitations:
 
 - One hand at a time (`num_hands=1`).
-- Static poses only.
-- Accuracy depends on framing, lighting and background.
+- Static poses only — J and Z need motion.
+- The live view needs a WebRTC connection, which some networks block. The
+  photo modes run the same recognition and work anywhere.
 
 ---
 
