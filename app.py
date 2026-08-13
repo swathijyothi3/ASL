@@ -42,15 +42,15 @@ def project_path(*parts):
 DATASET_PATH = project_path("dataset", "ASL_Dataset", "dataset")
 LANDMARK_CSV = project_path("output", "asl_landmarks.csv")
 
-# The live view needs streamlit-webrtc, which needs a WebRTC connection to
-# survive the viewer's network. The snapshot modes work everywhere, so a
-# missing or blocked live view degrades to a notice rather than an error.
+# The live view runs in the browser rather than on the server: MediaPipe's
+# JavaScript build finds the hand and the exported weights classify it, so
+# no video is uploaded and the server does no per-frame work.
 try:
-    from utils.live import live_view
+    from utils.webcam import browser_live_view
 
     LIVE_AVAILABLE = True
 except Exception:  # noqa: BLE001 — reported in the interface
-    live_view = None
+    browser_live_view = None
     LIVE_AVAILABLE = False
 
 
@@ -834,7 +834,7 @@ with recognise_tab:
         st.caption(
             "Your hand is outlined as soon as it is found, and the letter "
             "appears along the bottom of the picture. The view is mirrored, "
-            "so it behaves like a mirror. Nothing is recorded or uploaded."
+            "so it behaves like a mirror."
         )
 
         if not LIVE_AVAILABLE:
@@ -844,31 +844,38 @@ with recognise_tab:
                 "recognition, one frame at a time."
             )
         else:
-            try:
-                live_view(predictor, threshold=float(threshold), key="live_view")
-            except Exception as error:  # noqa: BLE001 — shown to the user
+            ready = browser_live_view(
+                threshold=float(threshold),
+                model_path=project_path("output", "web_model.json"),
+            )
+
+            if not ready:
                 st.warning(
-                    "The live view could not start here. **Take a photo** "
-                    "runs the same recognition and works on any network."
+                    "`output/web_model.json` is missing, so the live view "
+                    "can outline your hand but not name the letter. "
+                    "Regenerate it with `python tools/export_web_model.py`."
                 )
-                with st.expander("Technical details"):
-                    st.exception(error)
 
             st.info(
-                "Press **START** and allow camera access. Hold each sign "
+                "Allow camera access when your browser asks. Hold each sign "
                 "still for a moment — the letter is only shown once it "
                 "settles, which stops it flickering between similar shapes."
             )
 
-            with st.expander("The video will not start"):
+            with st.expander("How this works, and what to do if it doesn't"):
                 st.markdown(
                     """
-                    The live view needs a direct video connection to your
-                    browser, which some office, campus and mobile networks
-                    block. Nothing is wrong with your camera or the app.
+                    This view runs **entirely in your browser**. The camera
+                    image never leaves your machine and is never sent to the
+                    server — hand detection and the letter are both computed
+                    locally, which is also why it keeps up with the video.
 
-                    Switch to **Take a photo** — it runs exactly the same
-                    recognition on a single frame and works on any network.
+                    It does need to fetch the hand detector once, from
+                    Google's and jsDelivr's servers. If a network blocks
+                    those, the panel says so.
+
+                    Either way, **Take a photo** runs the same recognition on
+                    a single frame and needs nothing extra.
                     """
                 )
 

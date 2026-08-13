@@ -12,7 +12,9 @@ Streamlit.
 ## Features
 
 - **Live camera view** — your hand is outlined as you move and the letter is
-  read continuously, so you can adjust until it reads correctly.
+  read continuously, so you can adjust until it reads correctly. It runs
+  entirely in your browser: the video never leaves your machine and the server
+  does no per-frame work.
 - **Three more ways in** — take a single photo, upload an image, or run a
   built-in example if you have no webcam.
 - **Interactive 3D hand** — the 21 detected landmarks drawn as a rotatable
@@ -131,14 +133,22 @@ ASL_VISION/
 ├── utils/
 │   ├── features.py            # Landmarks → pose-only features (shared)
 │   ├── predictor.py           # Detection + inference
-│   ├── live.py                # Live camera view and overlay
+│   ├── webcam.py              # Live camera view (runs in the browser)
 │   └── visuals.py             # Plotly figures, including the 3D hand
 │
 └── tools/
     ├── train_model.py         # Trains the shipped model
+    ├── export_web_model.py    # Exports weights for the browser live view
     ├── evaluate.py            # Whole-pipeline accuracy, incl. webcam sims
     ├── tune_crop.py           # Measures the crop refinement
     └── check_setup.py         # Verifies an install before running the app
+```
+
+After retraining, regenerate the browser copy too, or the live view will keep
+using the old weights:
+
+```bash
+python tools/export_web_model.py
 ```
 
 `utils/features.py` is imported by both the trainer and the predictor on
@@ -296,8 +306,8 @@ Other limitations:
 
 - One hand at a time (`num_hands=1`).
 - Static poses only — J and Z need motion.
-- The live view needs a WebRTC connection, which some networks block. The
-  photo modes run the same recognition and work anywhere.
+- The live view fetches the MediaPipe runtime from a CDN the first time it
+  runs. If that is blocked it says so, and the photo modes still work.
 
 ---
 
