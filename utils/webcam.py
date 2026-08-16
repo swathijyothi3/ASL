@@ -72,29 +72,62 @@ _TEMPLATE = r"""
 
 <style>
   * { box-sizing: border-box; }
-  #wrap { font-family: "Source Sans Pro", system-ui, sans-serif; color: #e2e8f0; }
+
+  /* The component lives in a fixed-height iframe, so the layout is driven
+     by height rather than width. Sizing the video by width instead — the
+     obvious thing — makes it taller than the frame on a wide desktop, and
+     the readout underneath it gets clipped away entirely while still
+     looking fine on a phone. */
+  html, body { margin: 0; height: 100%; }
+  #wrap {
+    font-family: "Source Sans Pro", system-ui, sans-serif; color: #e2e8f0;
+    height: 100%; display: flex; flex-direction: column; gap: 10px;
+  }
+  /* Sized in pixels by fit() once the camera shape is known. The
+     aspect-ratio here only covers the moment before that happens —
+     it cannot do the job on its own, because a flex-grown item has a
+     definite height and ignores it. */
   #stage {
-    position: relative; width: 100%; border-radius: 16px; overflow: hidden;
+    position: relative; flex: 0 0 auto;
+    width: 100%; max-width: 860px; max-height: 100%; margin: 0 auto;
+    aspect-ratio: 4 / 3;
+    border-radius: 16px; overflow: hidden;
     background: #0b1120; border: 1px solid rgba(148,163,184,0.25); line-height: 0;
   }
   #cam { display: none; }
-  #view { width: 100%; height: auto; display: block; }
+
+  /* contain, so the picture always fits the box whatever shape the
+     camera delivers, rather than overflowing it. */
+  #view { width: 100%; height: 100%; object-fit: contain; display: block; }
+
   #readout {
     position: absolute; left: 0; right: 0; bottom: 0;
     display: flex; align-items: baseline; gap: 18px;
     padding: 14px 20px; background: linear-gradient(transparent, rgba(2,6,23,0.92));
   }
-  #letter { font-size: 3.2rem; font-weight: 800; line-height: 1; color: #64748b; }
+  #letter {
+    font-size: 3.2rem; font-weight: 800; line-height: 1; color: #64748b;
+    min-width: 2.2rem;
+  }
   #letter.on { color: #4ade80; text-shadow: 0 0 26px rgba(74,222,128,0.45); }
   #note { font-size: 0.95rem; color: #cbd5e1; }
-  #bar { display: flex; align-items: center; gap: 14px; margin-top: 12px; }
+  #bar {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 14px;
+    max-width: 860px; width: 100%; margin: 0 auto;
+  }
   button {
     background: #1e293b; color: #e2e8f0; border: 1px solid rgba(148,163,184,0.35);
     border-radius: 8px; padding: 7px 16px; font-size: 0.9rem; cursor: pointer;
+    flex: 0 0 auto;
   }
   button:hover { border-color: #38bdf8; color: #38bdf8; }
   #status { font-size: 0.85rem; color: #94a3b8; }
   .bad { color: #fca5a5 !important; }
+
+  @media (max-width: 640px) {
+    #letter { font-size: 2.4rem; }
+    #note { font-size: 0.85rem; }
+  }
 </style>
 
 <script type="module">
@@ -327,6 +360,39 @@ let landmarker = null, stream = null, running = false;
 const detect = document.createElement("canvas");
 const dctx = detect.getContext("2d", { willReadFrequently: true });
 
+/* Size the picture to the frame it has, rather than to the page width.
+   The component sits in a fixed-height iframe, so sizing by width alone
+   makes the picture taller than the frame on a wide screen and pushes the
+   letter readout out of sight — which looked fine on a phone and broken on
+   a laptop. */
+function fit() {
+  const stage = document.getElementById("stage");
+  const wrap = document.getElementById("wrap");
+  const bar = document.getElementById("bar");
+
+  const gap = 10;
+  const availableHeight = wrap.clientHeight - bar.offsetHeight - gap;
+  const availableWidth = Math.min(wrap.clientWidth, 860);
+
+  if (availableHeight <= 0 || availableWidth <= 0) return;
+
+  const ratio = (canvas.width || 4) / (canvas.height || 3);
+
+  let height = availableHeight;
+  let width = height * ratio;
+
+  if (width > availableWidth) {
+    width = availableWidth;
+    height = width / ratio;
+  }
+
+  stage.style.aspectRatio = "auto";
+  stage.style.width = Math.floor(width) + "px";
+  stage.style.height = Math.floor(height) + "px";
+}
+
+window.addEventListener("resize", () => { if (running) fit(); });
+
 async function setup() {
   let vision;
   try {
@@ -406,6 +472,8 @@ async function start() {
 
   detect.width = CONFIG.detectWidth;
   detect.height = Math.round(CONFIG.detectWidth * ratio);
+
+  fit();
 
   running = true;
   toggle.textContent = "Stop camera";
